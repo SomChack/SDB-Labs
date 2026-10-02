@@ -12,3 +12,10 @@
 4.  **`SDB-Labs/lab_4`**
 5.  **`SDB-Labs/lab_5`**
 6.  **`SDB-Labs/lab_6`**
+
+## Используемые технологии и ПО
+
+1. **Linux** или **WSL**
+2. **DBevear**
+3. **Git**
+4. **Docker**
