@@ -1,0 +1,431 @@
+database:
+  name: ships_db
+  description: "Нормализованная база данных судов, рейсов и истории перемещений (НФБК)"
+
+  # Условные обозначения:
+  #   json:        из какого поля ships_data.json берётся значение (для загрузчика)
+  #   unique:      UNIQUE на столбец
+  #   check:       CHECK на столбец
+  #   references:  внешний ключ; on_delete — режим удаления родителя
+  #                (RESTRICT — запретить, CASCADE — удалить зависимые, SET NULL — обнулить ссылку)
+  #   constraints: ограничения на таблицу целиком (составные UNIQUE и CHECK)
+  # Столбцы без json: служебные (суррогатные ключи), в JSON их нет.
+  # Индексы, партиции и прочая оптимизация в эту лабу не входят.
+
+  tables:
+
+    # ==========================================
+    # 1. ОСНОВНЫЕ СУЩНОСТИ
+    # ==========================================
+
+    Ship:
+      description: "Судно и его постоянные характеристики"
+      # imo — первичный ключ; mmsi и call_sign — альтернативные (потенциальные) ключи,
+      # поэтому они UNIQUE (иначе нарушается НФБК: mmsi -> imo, call_sign -> imo)
+      columns:
+        imo:
+          type: INTEGER
+          primary_key: true
+          nullable: false
+          json: imo
+          check: "imo BETWEEN 1000000 AND 9999999"
+
+        mmsi:
+          type: VARCHAR(9)          # строка, а не число: MMSI может начинаться с нуля
+          nullable: true
+          unique: true
+          json: mmsi
+          check: "mmsi ~ '^[0-9]{9}$'"
+
+        call_sign:
+          type: VARCHAR(20)
+          nullable: true
+          unique: true
+          json: callSign
+          check: "call_sign ~ '^[A-Z0-9]{3,10}$'"
+
+        name:
+          type: VARCHAR(255)
+          nullable: true
+          json: name
+          check: "name <> '' AND name = btrim(name)"
+
+        name_lat:                   # международное имя; не выводится из name (это отдельный атрибут)
+          type: VARCHAR(255)
+          nullable: true
+          json: nameLat
+          check: "name_lat <> '' AND name_lat = btrim(name_lat)"
+
+        flag_country_id:            # страна-производитель судна (поле flag в JSON)
+          type: INTEGER
+          references: Country.id
+          on_delete: RESTRICT
+          nullable: true
+          json: flag
+
+        owner_country_id:           # страна-владелец судна
+          type: INTEGER
+          references: Country.id
+          on_delete: RESTRICT
+          nullable: true
+          json: "сountry"           # внимание: в JSON первая буква КИРИЛЛИЧЕСКАЯ «с»
+
+        ship_type_id:
+          type: INTEGER
+          references: ShipType.id
+          on_delete: RESTRICT
+          nullable: true
+          json: shipTypeName
+
+
+    Voyage:
+      description: "Запланированный рейс конкретного судна"
+      columns:
+        id:
+          type: BIGINT
+          primary_key: true
+          generated: identity
+
+        ship_imo:
+          type: INTEGER
+          references: Ship.imo
+          on_delete: CASCADE        # рейс не существует без судна
+          nullable: false
+          json: imo
+
+        exit_port_id:
+          type: INTEGER
+          references: Port.id
+          on_delete: RESTRICT
+          nullable: false
+          json: [exitPort, exitPortCountry]
+
+        destination_port_id:
+          type: INTEGER
+          references: Port.id
+          on_delete: RESTRICT
+          nullable: false
+          json: [destinationPort, destinationPortCountry]
+
+        eta:
+          type: TIMESTAMP WITH TIME ZONE
+          nullable: false
+          json: eta                 # в JSON миллисекунды от эпохи -> конвертировать
+          check: "eta >= '2000-01-01' AND eta < '2100-01-01'"   # защита от ошибки единиц
+
+        country_follow_id:          # страна следования; не выводится из порта назначения
+          type: INTEGER             # (у SADIE и CORAL не совпадает), поэтому отдельный столбец
+          references: Country.id
+          on_delete: RESTRICT
+          nullable: true
+          json: countryFollow
+
+        supervisor_id:              # компания определяется через оператора
+          type: INTEGER
+          references: Supervisor.id
+          on_delete: SET NULL       # рейс важнее оператора
+          nullable: true
+          json: [supervisor, supervisorCompany]
+
+      constraints:
+        # защита от дубля рейса при загрузке (CORAL, BALTIC PIONEER, SOUTHERN STAR по 2 записи на один рейс)
+        - unique: [ship_imo, exit_port_id, destination_port_id, eta]
+        - check: "exit_port_id <> destination_port_id"
+
+
+    ShipPosition:
+      description: "Отдельное наблюдение положения судна в определённый момент (история перемещений)"
+      # Судно определяется через рейс (voyage_id). Хранить рядом ещё и ship_imo нельзя:
+      # возникла бы транзитивная зависимость position -> voyage -> ship (нарушение 3НФ).
+      columns:
+        id:
+          type: BIGINT
+          primary_key: true
+          generated: identity
+
+        voyage_id:
+          type: BIGINT
+          references: Voyage.id
+          on_delete: CASCADE        # позиция без рейса теряет смысл
+          nullable: false
+          json: [imo, exitPort, destinationPort, eta]   # рейс определяется по этим полям
+
+        received_at:
+          type: TIMESTAMP WITH TIME ZONE
+          nullable: false
+          json: receiveDate
+          check: "received_at >= '2000-01-01'"
+
+        info_source_id:
+          type: INTEGER
+          references: InfoSource.id
+          on_delete: RESTRICT
+          nullable: false
+          json: source
+
+        latitude:
+          type: NUMERIC(9, 6)
+          nullable: false
+          json: latitude
+          check: "latitude BETWEEN -90 AND 90"
+
+        longitude:
+          type: NUMERIC(9, 6)
+          nullable: false
+          json: longitude
+          check: "longitude BETWEEN -180 AND 180"
+
+        speed:
+          type: NUMERIC(8, 3)
+          nullable: true
+          json: speed
+          check: "speed <= 100"
+          # Нижней границы нет: в данных у BALTIC PIONEER speed = -12 (две записи), их нужно загрузить.
+
+        course:
+          type: NUMERIC(6, 2)
+          nullable: true
+          json: course
+          check: "course >= 0 AND course < 360"
+
+        rot:
+          type: NUMERIC(8, 3)
+          nullable: true
+          json: rot
+          check: "rot BETWEEN -720 AND 720"
+
+        heading:
+          type: SMALLINT
+          nullable: true
+          json: heading
+          check: "heading BETWEEN 0 AND 359"
+
+        nav_status_id:
+          type: INTEGER
+          references: NavStatus.id
+          on_delete: RESTRICT
+          nullable: true
+          json: navStatus
+
+        sea_id:
+          type: INTEGER
+          references: Sea.id
+          on_delete: SET NULL       # море определяется по координатам, потеря ссылки мало вредит
+          nullable: true
+          json: sea
+
+      constraints:
+        - unique: [voyage_id, received_at]
+
+
+    Sea:
+      description: "Море или акватория"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          unique: true
+          json: sea
+          check: "name <> '' AND name = btrim(name)"
+
+        area_km:
+          type: NUMERIC(14, 2)
+          nullable: true
+          json: seaAreaKm           # в JSON строка -> привести к числу
+          check: "area_km > 0 AND area_km <= 361000000"   # верхний предел: площадь Мирового океана
+
+
+    # ==========================================
+    # 2. СПРАВОЧНИКИ
+    # ==========================================
+
+    Country:
+      description: "Страны (в JSON только коды)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        code:
+          type: VARCHAR(10)
+          nullable: false
+          unique: true
+          json: [flag, "сountry", countryFollow, exitPortCountry, destinationPortCountry]
+          check: "code ~ '^[A-Z]{2,3}$'"
+
+
+    ShipType:
+      description: "Типы судов (Tanker, Cargo, Cruise ...)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          unique: true
+          json: shipTypeName
+          check: "name <> '' AND name = btrim(name)"
+
+
+    NavStatus:
+      description: "Навигационные статусы (At Anchor, Moored, Underway using engine)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(100)
+          nullable: false
+          unique: true
+          json: navStatus
+          check: "name <> '' AND name = btrim(name)"
+
+
+    Port:
+      description: "Порты и страны, в которых они находятся (одна таблица для порта выхода и порта назначения)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          json: [exitPort, destinationPort]
+          check: "name <> '' AND name = btrim(name)"
+
+        country_id:
+          type: INTEGER
+          references: Country.id
+          on_delete: RESTRICT
+          nullable: false
+          json: [exitPortCountry, destinationPortCountry]
+
+      constraints:
+        - unique: [name, country_id]   # названия портов неуникальны, уникальна пара
+
+
+    InfoSource:
+      description: "Источники информации о положении судов (EXACTEARTH, SHIPFINDER, OCEANTRACKER)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          unique: true
+          json: source
+          check: "name <> '' AND name = btrim(name)"
+
+
+    Company:
+      description: "Компании-супервайзеры"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          unique: true
+          json: supervisorCompany
+          check: "name <> '' AND name = btrim(name)"
+
+
+    Supervisor:
+      description: "Операторы сопровождения плавания (много операторов — одна компания)"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(255)
+          nullable: false
+          json: supervisor
+          check: "name <> '' AND name = btrim(name)"
+
+        company_id:
+          type: INTEGER
+          references: Company.id
+          on_delete: RESTRICT       # плюс триггер trg_company_delete_unused_supervisors
+          nullable: false
+          json: supervisorCompany
+
+      constraints:
+        - unique: [company_id, name]   # ФИО само по себе неуникально
+
+
+    # ==========================================
+    # 3. АКВАТОРИИ И ДОПУСТИМЫЕ КАТЕГОРИИ СУДОВ
+    # ==========================================
+
+    ShipCategory:
+      description: "Категории судов, допущенных к плаванию в акватории (military, trade, commercial, tourism, research, cruise). Не путать с ShipType: словари значений разные"
+      columns:
+        id:
+          type: INTEGER
+          primary_key: true
+          generated: identity
+
+        name:
+          type: VARCHAR(100)
+          nullable: false
+          unique: true
+          json: seaTypes            # в JSON строка с Python-списком -> ast.literal_eval
+          check: "name <> '' AND name = btrim(name)"
+
+
+    SeaShipCategory:
+      description: "Связь M:N: какие категории судов допущены в какой акватории"
+      columns:
+        sea_id:
+          type: INTEGER
+          primary_key: true
+          references: Sea.id
+          on_delete: CASCADE        # строка связи без моря бессмысленна
+
+        ship_category_id:
+          type: INTEGER
+          primary_key: true
+          references: ShipCategory.id
+          on_delete: CASCADE        # строка связи без категории бессмысленна
+
+
+  # ==========================================
+  # 4. ТРИГГЕРЫ УДАЛЕНИЯ
+  # ==========================================
+
+  triggers:
+
+    trg_voyage_forbid_delete_active:
+      function: fn_voyage_forbid_delete_active
+      table: Voyage
+      event: "BEFORE DELETE, FOR EACH ROW"
+      description: "Запрет удаления незавершённого рейса (eta ещё в будущем)"
+      protects_from: "Случайного удаления идущего рейса, в том числе каскадом при удалении судна"
+
+    trg_company_delete_unused_supervisors:
+      function: fn_company_delete_unused_supervisors
+      table: Company
+      event: "BEFORE DELETE, FOR EACH ROW"
+      description: "Удаляет операторов компании без рейсов; если остался оператор с рейсами, удаление компании отклоняется"
+      protects_from: "Потери связи «кто вёл плавание»: рейсы не остаются без оператора из-за удаления компании"
