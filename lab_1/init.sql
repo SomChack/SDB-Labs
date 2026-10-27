@@ -1,16 +1,8 @@
--- ============================================================
--- Лаба 1. Структура БД судов, рейсов и истории перемещений
--- PostgreSQL 17. Нормализация до НФБК.
--- Содержимое: таблицы, первичные ключи, внешние ключи с режимами
--- удаления, NOT NULL, CHECK, UNIQUE, триггеры.
--- Индексы и прочая оптимизация в эту лабу не входят.
--- ============================================================
-
 -- ------------------------------------------------------------
 -- 1. СПРАВОЧНИКИ
 -- ------------------------------------------------------------
 
--- Страны (в JSON только коды: USA, UK, GER, NZ ...)
+-- Страны 
 CREATE TABLE country (
     id    INTEGER GENERATED ALWAYS AS IDENTITY,
     code  VARCHAR(10) NOT NULL,
@@ -19,7 +11,7 @@ CREATE TABLE country (
     CONSTRAINT chk_country_code_format CHECK (code ~ '^[A-Z]{2,3}$')
 );
 
--- Типы судов (Tanker, Cargo, Cruise ...)
+-- Типы судов
 CREATE TABLE ship_type (
     id    INTEGER GENERATED ALWAYS AS IDENTITY,
     name  VARCHAR(255) NOT NULL,
@@ -28,7 +20,7 @@ CREATE TABLE ship_type (
     CONSTRAINT chk_ship_type_name_clean CHECK (name <> '' AND name = btrim(name))
 );
 
--- Навигационные статусы (At Anchor, Moored, Underway using engine)
+-- Навигационные статусы
 CREATE TABLE nav_status (
     id    INTEGER GENERATED ALWAYS AS IDENTITY,
     name  VARCHAR(100) NOT NULL,
@@ -37,7 +29,7 @@ CREATE TABLE nav_status (
     CONSTRAINT chk_nav_status_name_clean CHECK (name <> '' AND name = btrim(name))
 );
 
--- Источники данных о положении судов (EXACTEARTH, SHIPFINDER, OCEANTRACKER)
+-- Источники данных о положении судов 
 CREATE TABLE info_source (
     id    INTEGER GENERATED ALWAYS AS IDENTITY,
     name  VARCHAR(255) NOT NULL,
@@ -56,8 +48,6 @@ CREATE TABLE company (
 );
 
 -- Категории судов, допущенных к плаванию в акватории
--- (military, trade, commercial, tourism, research, cruise).
--- Не путать с ship_type: словари значений разные.
 CREATE TABLE ship_category (
     id    INTEGER GENERATED ALWAYS AS IDENTITY,
     name  VARCHAR(100) NOT NULL,
@@ -77,11 +67,9 @@ CREATE TABLE sea (
     CONSTRAINT pk_sea PRIMARY KEY (id),
     CONSTRAINT uq_sea_name UNIQUE (name),
     CONSTRAINT chk_sea_name_clean CHECK (name <> '' AND name = btrim(name)),
-    -- верхний предел: площадь всего Мирового океана
     CONSTRAINT chk_sea_area_range CHECK (area_km > 0 AND area_km <= 361000000)
 );
 
--- Связь M:N: какие категории судов допущены в какой акватории
 CREATE TABLE sea_ship_category (
     sea_id            INTEGER NOT NULL,
     ship_category_id  INTEGER NOT NULL,
@@ -96,7 +84,7 @@ CREATE TABLE sea_ship_category (
 -- 3. ПОРТЫ, КОМПАНИИ, ОПЕРАТОРЫ
 -- ------------------------------------------------------------
 
--- Одна таблица для порта выхода и порта назначения (один объект в двух ролях)
+-- Порт выхода и назначения
 CREATE TABLE port (
     id          INTEGER GENERATED ALWAYS AS IDENTITY,
     name        VARCHAR(255) NOT NULL,
@@ -109,13 +97,12 @@ CREATE TABLE port (
         REFERENCES country (id) ON DELETE RESTRICT
 );
 
--- Операторы сопровождения плавания (много операторов — одна компания)
+-- Операторы сопровождения плавания
 CREATE TABLE supervisor (
     id          INTEGER GENERATED ALWAYS AS IDENTITY,
     name        VARCHAR(255) NOT NULL,
     company_id  INTEGER NOT NULL,
     CONSTRAINT pk_supervisor PRIMARY KEY (id),
-    -- ФИО само по себе неуникально
     CONSTRAINT uq_supervisor_company_name UNIQUE (company_id, name),
     CONSTRAINT chk_supervisor_name_clean CHECK (name <> '' AND name = btrim(name)),
     CONSTRAINT fk_supervisor_company FOREIGN KEY (company_id)
@@ -126,9 +113,7 @@ CREATE TABLE supervisor (
 -- 4. СУДА, РЕЙСЫ, ПОЗИЦИИ
 -- ------------------------------------------------------------
 
--- Судно и его постоянные характеристики.
--- imo — первичный ключ; mmsi и call_sign — альтернативные (потенциальные)
--- ключи, поэтому UNIQUE (иначе нарушается НФБК: mmsi -> imo, call_sign -> imo).
+-- Судно
 CREATE TABLE ship (
     imo               INTEGER NOT NULL,
     mmsi              VARCHAR(9),      -- строка: MMSI может начинаться с нуля
@@ -164,10 +149,8 @@ CREATE TABLE voyage (
     country_follow_id    INTEGER,       -- страна следования, не выводится из порта назначения
     supervisor_id        INTEGER,       -- компания определяется через оператора
     CONSTRAINT pk_voyage PRIMARY KEY (id),
-    -- защита от дубля рейса при повторной загрузке
     CONSTRAINT uq_voyage_plan UNIQUE (ship_imo, exit_port_id, destination_port_id, eta),
     CONSTRAINT chk_voyage_ports_differ CHECK (exit_port_id <> destination_port_id),
-    -- защита от ошибки единиц (миллисекунды/секунды) при загрузке eta
     CONSTRAINT chk_voyage_eta_range CHECK (eta >= TIMESTAMPTZ '2000-01-01 00:00:00+00'
                                        AND eta <  TIMESTAMPTZ '2100-01-01 00:00:00+00'),
     CONSTRAINT fk_voyage_ship FOREIGN KEY (ship_imo)
@@ -182,9 +165,7 @@ CREATE TABLE voyage (
         REFERENCES supervisor (id) ON DELETE SET NULL
 );
 
--- Отдельное наблюдение положения судна в определённый момент (история перемещений).
--- Судно определяется через рейс: хранить рядом ещё и ship_imo нельзя
--- (транзитивная зависимость position -> voyage -> ship, нарушение 3НФ).
+-- Положение судна
 CREATE TABLE ship_position (
     id             BIGINT GENERATED ALWAYS AS IDENTITY,
     voyage_id      BIGINT NOT NULL,
@@ -203,7 +184,6 @@ CREATE TABLE ship_position (
     CONSTRAINT chk_ship_position_received_at CHECK (received_at >= TIMESTAMPTZ '2000-01-01 00:00:00+00'),
     CONSTRAINT chk_ship_position_latitude_range CHECK (latitude BETWEEN -90 AND 90),
     CONSTRAINT chk_ship_position_longitude_range CHECK (longitude BETWEEN -180 AND 180),
-    -- нижней границы у скорости нет: в тестовых данных у BALTIC PIONEER speed = -12
     CONSTRAINT chk_ship_position_speed_max CHECK (speed <= 100),
     CONSTRAINT chk_ship_position_course_range CHECK (course >= 0 AND course < 360),
     CONSTRAINT chk_ship_position_rot_range CHECK (rot BETWEEN -720 AND 720),
@@ -222,9 +202,7 @@ CREATE TABLE ship_position (
 -- 5. ТРИГГЕРЫ УДАЛЕНИЯ
 -- ------------------------------------------------------------
 
--- 5.1. Запрет удаления незавершённого рейса.
--- Срабатывает и при каскадном удалении рейсов от судна: ошибка на одном
--- рейсе откатывает всю операцию, позиции рейса не пропадают.
+-- Запрет удаления незавершённого рейса
 CREATE FUNCTION fn_voyage_forbid_delete_active()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -245,9 +223,7 @@ CREATE TRIGGER trg_voyage_forbid_delete_active
     FOR EACH ROW
     EXECUTE FUNCTION fn_voyage_forbid_delete_active();
 
--- 5.2. Удаление компании вместе с неиспользуемыми операторами.
--- Операторов без рейсов удаляет, а если остался оператор с рейсами,
--- отклоняет удаление компании и называет оператора.
+--  Удаление компании вместе с неиспользуемыми операторами
 CREATE FUNCTION fn_company_delete_unused_supervisors()
 RETURNS trigger
 LANGUAGE plpgsql
