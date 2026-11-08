@@ -1,0 +1,37 @@
+version: '3.1'
+
+services:
+
+  db:
+    image: postgis/postgis:17-3.5
+    restart: always
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: my_super_secret
+      POSTGRES_USER: ships
+    depends_on:
+      ext_db:
+        condition: service_healthy    
+
+  ext_db:
+    image: postgres:17
+    restart: always
+    ports:
+      - "5433:5432"                 
+    volumes:
+      - ./ext_init.sql:/docker-entrypoint-initdb.d/ext_init.sql
+      - ./module_2:/csv:ro            
+      - ./ext_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: my_super_secret
+      POSTGRES_USER: ships
+      POSTGRES_DB: ext_ships
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ships -d ext_ships"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
