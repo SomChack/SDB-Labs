@@ -8,6 +8,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
+      # схема БД из первой лабораторной (создаётся при первом запуске контейнера)
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - ./data:/var/lib/postgresql/data
     environment:
       POSTGRES_PASSWORD: my_super_secret
